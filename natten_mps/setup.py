@@ -18,15 +18,12 @@ class MetalBuildExtension(BuildExtension):
         
         os.makedirs(metal_kernels_dir, exist_ok=True)
 
-        # Find all .metal source files.
+        # Find all .metal source files using relative paths
         metal_files = glob.glob(os.path.join("csrc", "mps", "kernels", "*.metal"))
         if not metal_files:
             raise RuntimeError(f"No .metal files found in 'csrc/mps/kernels'. Cannot build Metal library.")
 
         print(f"Found Metal source files: {metal_files}")
-
-        # Define the path to the shared kernel helpers header
-        structs_header_dir = os.path.join("csrc", "include")
 
         # compile all .metal files into a single .metallib.
         try:
@@ -49,9 +46,8 @@ class MetalBuildExtension(BuildExtension):
 # Main Setup Configuration
 # =================================================================================
 
-extensions_dir = os.path.abspath("csrc")
-
-# Find all C++ and Objective-C++ source files for the extension.
+# Use relative paths, which is safe and maintainable
+extensions_dir = "csrc"
 sources = glob.glob(os.path.join(extensions_dir, "*.mm")) + \
           glob.glob(os.path.join(extensions_dir, "mps", "*.mm"))
 

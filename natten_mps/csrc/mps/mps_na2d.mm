@@ -1,4 +1,4 @@
-#include "natten/mps_na2d.h"
+#include "../include/natten/mps_na2d.h"
 #include "kernels/mps_kernel_structs.h"
 #include <ATen/mps/MPSStream.h>
 #import <Metal/Metal.h>

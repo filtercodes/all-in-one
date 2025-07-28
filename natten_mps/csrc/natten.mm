@@ -1,6 +1,6 @@
 #include <torch/extension.h>
-#include "natten/mps_na1d.h"
-#include "natten/mps_na2d.h"
+#include "include/natten/mps_na1d.h"
+#include "include/natten/mps_na2d.h"
 #include <string>
 
 std::string metallib_path;

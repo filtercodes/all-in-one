@@ -1,29 +1,38 @@
 import torch
 from torch.autograd import Function
 import os
+import sys
+import importlib.resources as importlib_resources
 from . import _C
 
 # --- MPS Backend Initialization ---
+_MPS_BACKEND_INITIALIZED = False
+
 def _init_mps_backend():
     """
-    Called automatically when this module is imported.
+    Initializes the MPS backend by locating and loading the Metal library.
+    This function is called lazily on the first forward pass.
     """
-    # Use the location of the compiled extension to find the package path
-    package_path = os.path.dirname(os.path.abspath(_C.__file__))
-    metallib_path = os.path.join(package_path, "mps", "kernels", "natten.metallib")
+    global _MPS_BACKEND_INITIALIZED
+    if _MPS_BACKEND_INITIALIZED:
+        return
+    
+    # Use the recommended way to find package data
+    with importlib_resources.path("natten.mps.kernels", "natten.metallib") as p:
+        metallib_path = str(p)
+    
     if not os.path.exists(metallib_path):
         raise RuntimeError(
             f"NATTEN Metal library not found at '{metallib_path}'. "
             "Please reinstall the package to ensure it's compiled correctly."
         )
     _C.init_natten_mps(metallib_path)
-    return True
-
-_mps_backend_initialized = _init_mps_backend()
+    _MPS_BACKEND_INITIALIZED = True
 
 class NATTEN1DFunction(Function):
     @staticmethod
     def forward(ctx, query, key, value, rpb, kernel_size, dilation, original_length):
+        _init_mps_backend()
         ctx.kernel_size = kernel_size
         ctx.dilation = dilation
         is_causal = False # TODO: make is_causal a real parameter
@@ -46,6 +55,7 @@ class NATTEN1DFunction(Function):
 class NATTEN2DFunction(Function):
     @staticmethod
     def forward(ctx, query, key, value, rpb, kernel_size, dilation, original_height, original_width):
+        _init_mps_backend()
         ctx.kernel_size = kernel_size
         ctx.dilation = dilation
         is_causal = False # TODO: make is_causal a real parameter
