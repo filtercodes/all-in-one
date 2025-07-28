@@ -5,9 +5,19 @@
 
 import math
 import torch
+import os
 from abc import ABC,  abstractmethod
 from typing import Optional, Tuple, Callable
-from natten.functional import natten1dav, natten1dqkrpb, natten2dav, natten2dqkrpb
+
+# --- API Agnostic Imports ---
+# Use an environment variable to switch between APIs. Default to MPS.
+NATTEN_API = os.environ.get("NATTEN_API", "mps")
+
+if NATTEN_API == "mps":
+    from natten import natten1d, natten2d
+else: # cpu/cuda
+    from natten.functional import natten1dav, natten1dqkrpb, natten2dav, natten2dqkrpb
+
 from ..config import Config
 from .utils import *
 
@@ -49,10 +59,7 @@ class DinatDropPath(nn.Module):
 
 
 class _NeighborhoodAttentionNd(ABC, nn.Module):
-  # rpb is learnable relative positional biases; same concept is used Swin.
   rpb: nn.Parameter
-  nattendqkrpb: Callable
-  nattendav: Callable
   
   def __init__(
     self,
@@ -84,38 +91,42 @@ class _NeighborhoodAttentionNd(ABC, nn.Module):
     self,
     hidden_states: torch.Tensor,
     output_attentions: Optional[bool] = False,
+    original_dims: Optional[Tuple[int, ...]] = None,
   ) -> Tuple[torch.Tensor]:
     query_layer = self.transpose_for_scores(self.query(hidden_states))
     key_layer = self.transpose_for_scores(self.key(hidden_states))
     value_layer = self.transpose_for_scores(self.value(hidden_states))
     
-    # Apply the scale factor before computing attention weights. It's usually more efficient because
-    # attention weights are typically a bigger tensor compared to query.
-    # It gives identical results because scalars are commutable in matrix multiplication.
     query_layer = query_layer / math.sqrt(self.attention_head_size)
     
-    # Compute NA between "query" and "key" to get the raw attention scores, and add relative positional biases.
-    # attention_scores = natten2dqkrpb(query_layer, key_layer, self.rpb, self.dilation)
-    attention_scores = self.nattendqkrpb(query_layer, key_layer, self.rpb, self.kernel_size, self.dilation)
-    
-    # Normalize the attention scores to probabilities.
-    attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-    
-    # This is actually dropping out entire tokens to attend to, which might
-    # seem a bit unusual, but is taken from the original Transformer paper.
-    attention_probs = self.dropout(attention_probs)
-    
-    # context_layer = natten2dav(attention_probs, value_layer, self.dilation)
-    context_layer = self.nattendav(attention_probs, value_layer, self.kernel_size, self.dilation)
-    if len(context_layer.shape) > 4:  # 2D
-      context_layer = context_layer.permute(0, 2, 3, 1, 4).contiguous()
-    else:  # 1D
-      context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-    new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-    context_layer = context_layer.view(new_context_layer_shape)
-    
-    outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
-    
+    if NATTEN_API == "mps":
+        # MPS Backend Path
+        context_layer = self.natten(
+            query_layer,
+            key_layer,
+            value_layer,
+            self.rpb,
+            self.kernel_size,
+            self.dilation,
+            *original_dims,
+        )
+        outputs = (context_layer, None) if output_attentions else (context_layer,)
+    else:
+        # CPU/CUDA Backend Path (Original Logic)
+        attention_scores = self.nattendqkrpb(query_layer, key_layer, self.rpb, self.kernel_size, self.dilation)
+        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        attention_probs = self.dropout(attention_probs)
+        context_layer = self.nattendav(attention_probs, value_layer, self.kernel_size, self.dilation)
+        
+        if len(context_layer.shape) > 4:  # 2D
+            context_layer = context_layer.permute(0, 2, 3, 1, 4).contiguous()
+        else:  # 1D
+            context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+            
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(new_context_layer_shape)
+        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+
     return outputs
   
   def transpose_for_scores(self, x):
@@ -124,7 +135,7 @@ class _NeighborhoodAttentionNd(ABC, nn.Module):
     if len(x.shape) > 4:  # 2D
       return x.permute(0, 3, 1, 2, 4)
     else:  # 1D
-      return x.permute(0, 2, 1, 3)
+      return x.permute(0, 2, 1, 3).contiguous()
 
 
 class NeighborhoodAttention1d(_NeighborhoodAttentionNd):
@@ -141,8 +152,11 @@ class NeighborhoodAttention1d(_NeighborhoodAttentionNd):
       torch.zeros(num_heads, (2 * self.kernel_size - 1)),
       requires_grad=True,
     )
-    self.nattendqkrpb = natten1dqkrpb
-    self.nattendav = natten1dav
+    if NATTEN_API == "mps":
+        self.natten = natten1d
+    else:
+        self.nattendqkrpb = natten1dqkrpb
+        self.nattendav = natten1dav
 
 
 class NeighborhoodAttention2d(_NeighborhoodAttentionNd):
@@ -159,8 +173,11 @@ class NeighborhoodAttention2d(_NeighborhoodAttentionNd):
       torch.zeros(num_heads, (2 * self.kernel_size - 1), (2 * self.kernel_size - 1)),
       requires_grad=True,
     )
-    self.nattendqkrpb = natten2dqkrpb
-    self.nattendav = natten2dav
+    if NATTEN_API == "mps":
+        self.natten = natten2d
+    else:
+        self.nattendqkrpb = natten2dqkrpb
+        self.nattendav = natten2dav
 
 
 # Copied from transformers.models.nat.modeling_nat.NeighborhoodAttentionOutput
@@ -189,10 +206,11 @@ class _NeighborhoodAttentionModuleNd(ABC, nn.Module):
     self,
     hidden_states: torch.Tensor,
     output_attentions: Optional[bool] = False,
+    original_dims: Optional[Tuple[int, ...]] = None,
   ) -> Tuple[torch.Tensor]:
-    self_outputs = self.self(hidden_states, output_attentions)
+    self_outputs = self.self(hidden_states, output_attentions, original_dims)
     attention_output = self.output(self_outputs[0])
-    outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+    outputs = (attention_output,) + self_outputs[1:]
     return outputs
 
 
@@ -276,16 +294,17 @@ class _DinatLayerNd(ABC, nn.Module):
     if len(hidden_states.shape) > 3:
       is_2d = True
       N, K, T, C = hidden_states.size()
+      original_dims = (K, T)
     else:
       is_2d = False
       N, T, C = hidden_states.shape
+      original_dims = (T,)
     shortcut = hidden_states
     
     hidden_states = self.layernorm_before(hidden_states)
     # pad hidden_states if they are smaller than kernel size x dilation
     if is_2d:
       hidden_states, pad_values = self.maybe_pad(hidden_states, K, T)
-      _, height_pad, width_pad, _ = hidden_states.shape
     else:
       hidden_states, pad_values = self.maybe_pad(hidden_states, T)
     
@@ -295,32 +314,35 @@ class _DinatLayerNd(ABC, nn.Module):
       if attention is None:
         continue
       
-      attention_output = attention(attention_inputs, output_attentions=output_attentions)
-      attention_output = attention_output[0]
+      attention_output = attention(
+          attention_inputs, 
+          output_attentions=output_attentions,
+          original_dims=original_dims
+      )[0]
       
+      # Un-pad if necessary
       if is_2d:
         was_padded = pad_values[3] > 0 or pad_values[5] > 0
         if was_padded:
-          attention_output = attention_output[:, :K, :T, :].contiguous()
+          attention_output = attention_output[:, :original_dims[0], :original_dims[1], :].contiguous()
       else:
         was_padded = pad_values[3] > 0
         if was_padded:
-          attention_output = attention_output[:, :T, :].contiguous()
-      
+          attention_output = attention_output[:, :original_dims[0], :].contiguous()
+
       hidden_states = shortcut + self.drop_path(attention_output)
       hidden_states_list.append(hidden_states)
     
     if self.double_attention:
       hidden_states = torch.cat(hidden_states_list, dim=-1)
-      shortcut = torch.stack(hidden_states_list).sum(dim=0) / 2.
     else:
-      shortcut = hidden_states
+      hidden_states = hidden_states_list[0]
+    
     layer_output = self.layernorm_after(hidden_states)
     layer_output = self.output(self.intermediate(layer_output))
     
     layer_output = shortcut + self.drop_path(layer_output)
     
-    # layer_outputs = (layer_output, attention_outputs[1]) if output_attentions else (layer_output,)
     layer_outputs = (layer_output,)
     return layer_outputs
 

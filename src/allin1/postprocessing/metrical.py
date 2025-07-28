@@ -33,7 +33,13 @@ def postprocess_metrical_structure(
   activations_combined /= activations_combined.sum(dim=-1, keepdim=True)
   activations_combined = activations_combined.cpu().numpy()
 
+  print(f"Activations combined shape: {activations_combined.shape}, dtype: {activations_combined.dtype}")
+  print(f"Activations combined (first 5 rows):\n{activations_combined[:5]}")
+
   pred_downbeat_times = postprocessor_downbeat(activations_combined[:, :2])
+
+  print(f"Predicted downbeat times shape: {pred_downbeat_times.shape}")
+  print(f"Predicted downbeat times (first 5 rows):\n{pred_downbeat_times[:5]}")
 
   beats = pred_downbeat_times[:, 0]
   beat_positions = pred_downbeat_times[:, 1]

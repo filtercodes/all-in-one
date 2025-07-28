@@ -24,7 +24,9 @@ def run_inference(
   include_embeddings: bool,
 ) -> AnalysisResult:
   spec = np.load(spec_path)
+  print(f"Loaded spectrogram from {spec_path}, shape: {spec.shape}, dtype: {spec.dtype}")
   spec = torch.from_numpy(spec).unsqueeze(0).to(device)
+  print(f"Spectrogram tensor on device {device}, shape: {spec.shape}, dtype: {spec.dtype}")
 
   logits = model(spec)
 

@@ -36,9 +36,14 @@ This package provides models for music structure analysis, predicting:
 
 Visit [PyTorch](https://pytorch.org/) and install the appropriate version for your system.
 
-### 2. Install NATTEN (Required for Linux and Windows; macOS will auto-install)
+### 2. Install NATTEN (Required for Linux and Windows; special instructions for macOS)
 * **Linux**: Download from [NATTEN website](https://www.shi-labs.com/natten/)
-* **macOS**: Auto-installs with `allin1`.
+* **macOS**: MPS version of NATTEN is included. Please install it manually by following these steps:
+  ```shell
+  cd natten_mps
+  pip install .
+  cd ..
+  ```
 * **Windows**: Build from source:
 ```shell
 pip install ninja # Recommended, not required

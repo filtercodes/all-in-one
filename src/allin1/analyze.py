@@ -115,10 +115,10 @@ def analyze(
   # Analyze the tracks that are not analyzed yet.
   if todo_paths:
     # Run HTDemucs for source separation only for the tracks that are not analyzed yet.
-    demix_paths = demix(todo_paths, demix_dir, device)
+    demix_paths = demix(todo_paths, demix_dir, 'cpu')
 
     # Extract spectrograms for the tracks that are not analyzed yet.
-    spec_paths = extract_spectrograms(demix_paths, spec_dir, multiprocess)
+    spec_paths = extract_spectrograms(demix_paths, spec_dir, multiprocess, overwrite)
 
     # Load the model.
     model = load_pretrained_model(

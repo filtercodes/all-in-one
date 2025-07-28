@@ -26,8 +26,6 @@ classifiers = [
 dependencies = [
   "numpy",
   "librosa",
-  "natten; platform_system == 'Darwin'",
-  "demucs",
   "hydra-core",
   "omegaconf",
   "huggingface_hub",

@@ -9,13 +9,13 @@ from madmom.processors import SequentialProcessor
 from madmom.audio.spectrogram import FilteredSpectrogramProcessor, LogarithmicSpectrogramProcessor
 
 
-def extract_spectrograms(demix_paths: List[Path], spec_dir: Path, multiprocess: bool = True):
+def extract_spectrograms(demix_paths: List[Path], spec_dir: Path, multiprocess: bool = True, overwrite: bool = False):
   todos = []
   spec_paths = []
   for src in demix_paths:
     dst = spec_dir / f'{src.name}.npy'
     spec_paths.append(dst)
-    if dst.is_file():
+    if dst.is_file() and not overwrite:
       continue
     todos.append((src, dst))
 
