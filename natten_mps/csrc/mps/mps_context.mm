@@ -65,6 +65,7 @@ MetalKernel MetalContext::getKernel(const std::string& function_name) {
         NSString* function_name_ns = [NSString stringWithUTF8String:function_name.c_str()];
         id<MTLFunction> function = [_library newFunctionWithName:function_name_ns];
         TORCH_CHECK(function, "Failed to find kernel function: ", function_name);
+        [function retain];
 
         id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function error:&error];
         TORCH_CHECK(pipeline, "Failed to create pipeline state for ", function_name, ". Error: ", error.localizedDescription.UTF8String);
