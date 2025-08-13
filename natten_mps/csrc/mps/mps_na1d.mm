@@ -1,9 +1,8 @@
 #include "../include/natten/mps_na1d.h"
 #include "kernels/mps_kernel_structs.h"
+#include "mps_context.h"
 #include <ATen/mps/MPSStream.h>
 #import <Metal/Metal.h>
-
-extern std::string metallib_path;
 
 // Helper to get the underlying MTLBuffer from a tensor.
 static inline id<MTLBuffer> getMTLBufferStorage(const at::Tensor& tensor) {
@@ -24,33 +23,18 @@ torch::Tensor na1d_forward(
     const int64_t original_length) {
 
     @autoreleasepool {
-        // Common setup
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        TORCH_CHECK(device, "Failed to create MTLDevice.");
+        auto& context = natten::mps::MetalContext::getInstance();
 
-        __block NSError *error = nil;
-        NSString* metallib_path_ns = [NSString stringWithUTF8String:metallib_path.c_str()];
-        NSURL *libraryURL = [NSURL fileURLWithPath:metallib_path_ns];
-        id<MTLLibrary> library = [device newLibraryWithURL:libraryURL error:&error];
-        TORCH_CHECK(library, "Failed to load .metallib. Error: ", error.localizedDescription.UTF8String);
-
-        // Options for new tensors
         auto tensor_options = torch::TensorOptions().device(query.device()).dtype(query.dtype());
-
-        // Intermediate attention tensor
         auto attn_sizes = {query.size(0), query.size(1), query.size(2), kernel_size};
         auto attn = torch::empty(attn_sizes, tensor_options);
+        auto context_tensor = torch::empty_like(value);
 
-        // Intermediate context tensor (same shape as value)
-        auto context = torch::empty_like(value);
-
-        // Final output tensor with the permuted and reshaped dimensions
         const int64_t batch_size = query.size(0);
         const int64_t all_head_size = value.size(1) * value.size(3);
         auto output_sizes = {batch_size, original_length, all_head_size};
         auto output = torch::empty(output_sizes, tensor_options);
 
-        // Get command buffer and encoder once
         id<MTLCommandBuffer> commandBuffer = torch::mps::get_command_buffer();
         dispatch_queue_t serialQueue = torch::mps::get_dispatch_queue();
 
@@ -59,11 +43,8 @@ torch::Tensor na1d_forward(
 
             // QK+RPB dispatch
             {
-                id<MTLFunction> kernelFunction = [library newFunctionWithName:@"na1d_qkrpb_softmax"];
-                TORCH_CHECK(kernelFunction, "Failed to find kernel function: na1d_qkrpb_softmax");
-                id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:kernelFunction error:&error];
-                TORCH_CHECK(pipeline, "Failed to create pipeline state for QK+RPB 1D. Error: ", error.localizedDescription.UTF8String);
-                [encoder setComputePipelineState:pipeline];
+                auto kernel = context.getKernel("na1d_qkrpb_softmax");
+                [encoder setComputePipelineState:kernel.pipeline];
                 [encoder setBuffer:getMTLBufferStorage(query) offset:query.storage_offset() * query.element_size() atIndex:0];
                 [encoder setBuffer:getMTLBufferStorage(key) offset:key.storage_offset() * key.element_size() atIndex:1];
                 [encoder setBuffer:getMTLBufferStorage(rpb) offset:rpb.storage_offset() * rpb.element_size() atIndex:2];
@@ -92,7 +73,7 @@ torch::Tensor na1d_forward(
                 props.attn_stride_k = attn.stride(3);
                 [encoder setBytes:&props length:sizeof(props) atIndex:4];
                 MTLSize gridSize = MTLSizeMake(props.length, props.heads, props.batch_size);
-                NSUInteger threadGroupSize = pipeline.maxTotalThreadsPerThreadgroup;
+                NSUInteger threadGroupSize = kernel.pipeline.maxTotalThreadsPerThreadgroup;
                 if (threadGroupSize > gridSize.width) {
                     threadGroupSize = gridSize.width;
                 }
@@ -102,14 +83,11 @@ torch::Tensor na1d_forward(
 
             // AV dispatch
             {
-                id<MTLFunction> kernelFunction = [library newFunctionWithName:@"neighborhood_assembly_1d_av"];
-                TORCH_CHECK(kernelFunction, "Failed to find kernel function: neighborhood_assembly_1d_av");
-                id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:kernelFunction error:&error];
-                TORCH_CHECK(pipeline, "Failed to create pipeline state for AV 1D. Error: ", error.localizedDescription.UTF8String);
-                [encoder setComputePipelineState:pipeline];
+                auto kernel = context.getKernel("neighborhood_assembly_1d_av");
+                [encoder setComputePipelineState:kernel.pipeline];
                 [encoder setBuffer:getMTLBufferStorage(attn) offset:attn.storage_offset() * attn.element_size() atIndex:0];
                 [encoder setBuffer:getMTLBufferStorage(value) offset:value.storage_offset() * value.element_size() atIndex:1];
-                [encoder setBuffer:getMTLBufferStorage(context) offset:context.storage_offset() * context.element_size() atIndex:2];
+                [encoder setBuffer:getMTLBufferStorage(context_tensor) offset:context_tensor.storage_offset() * context_tensor.element_size() atIndex:2];
                 NA1dAVProperties props;
                 props.batch_size = attn.size(0);
                 props.heads = attn.size(1);
@@ -126,13 +104,13 @@ torch::Tensor na1d_forward(
                 props.value_stride_h = value.stride(1);
                 props.value_stride_l = value.stride(2);
                 props.value_stride_d = value.stride(3);
-                props.output_stride_b = context.stride(0);
-                props.output_stride_h = context.stride(1);
-                props.output_stride_l = context.stride(2);
-                props.output_stride_d = context.stride(3);
+                props.output_stride_b = context_tensor.stride(0);
+                props.output_stride_h = context_tensor.stride(1);
+                props.output_stride_l = context_tensor.stride(2);
+                props.output_stride_d = context_tensor.stride(3);
                 [encoder setBytes:&props length:sizeof(props) atIndex:3];
                 MTLSize gridSize = MTLSizeMake(props.length, props.heads, props.batch_size);
-                NSUInteger threadGroupSize = pipeline.maxTotalThreadsPerThreadgroup;
+                NSUInteger threadGroupSize = kernel.pipeline.maxTotalThreadsPerThreadgroup;
                 if (threadGroupSize > gridSize.width) {
                     threadGroupSize = gridSize.width;
                 }
@@ -142,28 +120,25 @@ torch::Tensor na1d_forward(
 
             // Permute and Reshape dispatch
             {
-                id<MTLFunction> kernelFunction = [library newFunctionWithName:@"na1d_permute_and_reshape"];
-                TORCH_CHECK(kernelFunction, "Failed to find kernel function: na1d_permute_and_reshape");
-                id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:kernelFunction error:&error];
-                TORCH_CHECK(pipeline, "Failed to create pipeline state for Permute/Reshape 1D. Error: ", error.localizedDescription.UTF8String);
-                [encoder setComputePipelineState:pipeline];
-                [encoder setBuffer:getMTLBufferStorage(context) offset:context.storage_offset() * context.element_size() atIndex:0];
+                auto kernel = context.getKernel("na1d_permute_and_reshape");
+                [encoder setComputePipelineState:kernel.pipeline];
+                [encoder setBuffer:getMTLBufferStorage(context_tensor) offset:context_tensor.storage_offset() * context_tensor.element_size() atIndex:0];
                 [encoder setBuffer:getMTLBufferStorage(output) offset:output.storage_offset() * output.element_size() atIndex:1];
                 PermuteAndReshape1dProperties props;
-                props.batch_size = context.size(0);
-                props.heads = context.size(1);
+                props.batch_size = context_tensor.size(0);
+                props.heads = context_tensor.size(1);
                 props.length = original_length;
-                props.dim = context.size(3);
-                props.context_stride_b = context.stride(0);
-                props.context_stride_h = context.stride(1);
-                props.context_stride_l = context.stride(2);
-                props.context_stride_d = context.stride(3);
+                props.dim = context_tensor.size(3);
+                props.context_stride_b = context_tensor.stride(0);
+                props.context_stride_h = context_tensor.stride(1);
+                props.context_stride_l = context_tensor.stride(2);
+                props.context_stride_d = context_tensor.stride(3);
                 props.output_stride_b = output.stride(0);
                 props.output_stride_l = output.stride(1);
                 props.output_stride_d = output.stride(2);
                 [encoder setBytes:&props length:sizeof(props) atIndex:2];
                 MTLSize gridSize = MTLSizeMake(props.length, 1, props.batch_size);
-                NSUInteger threadGroupSize = pipeline.maxTotalThreadsPerThreadgroup;
+                NSUInteger threadGroupSize = kernel.pipeline.maxTotalThreadsPerThreadgroup;
                 if (threadGroupSize > gridSize.width) {
                     threadGroupSize = gridSize.width;
                 }

@@ -1,33 +1,32 @@
 #pragma once
 
-#include <Metal/Metal.hpp>
-#include "mps_buffer_pool.h"
-
 #include <map>
 #include <mutex>
 #include <string>
+
+// Forward-declare Objective-C types to avoid importing Metal in the header.
+#ifdef __OBJC__
+@protocol MTLDevice, MTLCommandQueue, MTLFunction, MTLComputePipelineState, MTLLibrary;
+#else
+typedef void* id;
+#endif
 
 namespace natten {
 namespace mps {
 
 struct MetalKernel {
-    NS::SharedPtr<MTL::Function> function;
-    NS::SharedPtr<MTL::ComputePipelineState> pipeline;
+    id<MTLFunction> function;
+    id<MTLComputePipelineState> pipeline;
 };
 
 class MetalContext {
 public:
     static MetalContext& getInstance();
-    NS::SharedPtr<MTL::Device> device;
-    NS::SharedPtr<MTL::CommandQueue> commandQueue;
     
-    BufferPool& getBufferPool();
-
-    MetalKernel getKernel(
-        const std::string& file_name,
-        const std::string& function_name,
-        const char* kernel_path_cstr,
-        const char* extensions_dir_cstr);
+    id<MTLDevice> device;
+    id<MTLCommandQueue> commandQueue;
+    
+    MetalKernel getKernel(const std::string& function_name);
 
 private:
     MetalContext();
@@ -36,8 +35,8 @@ private:
     MetalContext& operator=(const MetalContext&) = delete;
 
     std::map<std::string, MetalKernel> _kernels;
+    id<MTLLibrary> _library;
     std::mutex _mtx;
-    std::unique_ptr<BufferPool> _buffer_pool;
 };
 
 } // namespace mps
